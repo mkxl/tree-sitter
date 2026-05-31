@@ -1,6 +1,8 @@
 use std::{
+    borrow::Cow,
     ffi::CString,
     fs,
+    ops::Range,
     os::raw::c_char,
     ptr, slice, str,
     sync::{
@@ -9,8 +11,10 @@ use std::{
     },
 };
 
+use tree_sitter::{Node, Point};
 use tree_sitter_highlight::{
-    Error, Highlight, HighlightConfiguration, HighlightEvent, Highlighter, HtmlRenderer, c,
+    ChunkedSource, Error, Highlight, HighlightConfiguration, HighlightEvent, Highlighter,
+    HtmlRenderer, c,
 };
 
 use super::helpers::fixtures::{get_highlight_config, get_language, get_language_queries_path};
@@ -78,6 +82,77 @@ static HTML_ATTRS: LazyLock<Vec<String>> = LazyLock::new(|| {
         .map(|s| format!("class={s}"))
         .collect()
 });
+
+#[derive(Clone, Copy)]
+struct SplitSource<'a> {
+    source: &'a [u8],
+    chunk_size: usize,
+}
+
+impl<'a> SplitSource<'a> {
+    const fn new(source: &'a [u8], chunk_size: usize) -> Self {
+        Self { source, chunk_size }
+    }
+
+    const fn chunks_for_range(self, range: Range<usize>) -> SplitChunks<'a> {
+        SplitChunks {
+            source: self.source,
+            range,
+            chunk_size: self.chunk_size,
+            offset: 0,
+        }
+    }
+}
+
+impl<'a> ChunkedSource<'a> for SplitSource<'a> {
+    type Chunk = &'a [u8];
+    type Chunks = SplitChunks<'a>;
+
+    fn len(&self) -> usize {
+        self.source.len()
+    }
+
+    fn chunk_at(&mut self, byte_offset: usize, _position: Point) -> Self::Chunk {
+        if byte_offset >= self.source.len() {
+            return &[];
+        }
+        let end = byte_offset
+            .saturating_add(self.chunk_size.max(1))
+            .min(self.source.len());
+        &self.source[byte_offset..end]
+    }
+
+    fn chunks_for_node(&mut self, node: Node) -> Self::Chunks {
+        self.chunks_for_range(node.byte_range())
+    }
+
+    fn text_for_range(&self, range: Range<usize>) -> Cow<'a, [u8]> {
+        Cow::Owned(self.chunks_for_range(range).flatten().copied().collect())
+    }
+}
+
+struct SplitChunks<'a> {
+    source: &'a [u8],
+    range: Range<usize>,
+    chunk_size: usize,
+    offset: usize,
+}
+
+impl<'a> Iterator for SplitChunks<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.range.start.saturating_add(self.offset);
+        if start >= self.range.end {
+            return None;
+        }
+        let end = start
+            .saturating_add(self.chunk_size.max(1))
+            .min(self.range.end);
+        self.offset = end.saturating_sub(self.range.start);
+        Some(&self.source[start..end])
+    }
+}
 
 #[test]
 fn test_highlighting_javascript() {
@@ -508,6 +583,81 @@ fn test_highlighting_cancellation() {
 }
 
 #[test]
+fn test_chunked_source_matches_byte_slice_highlighting() {
+    let cases = [
+        (
+            &*JS_HIGHLIGHT,
+            [
+                "module.exports = function a(b) {",
+                "  const module = c;",
+                "  console.log(module, b);",
+                "}",
+            ]
+            .join("\n"),
+        ),
+        (
+            &*EJS_HIGHLIGHT,
+            "<div><% foo() %></div><script> bar() </script>".to_string(),
+        ),
+        (
+            &*RUST_HIGHLIGHT,
+            ["assert!(", "    a.b.c() < D::e::<F>()", ");"].join("\n"),
+        ),
+    ];
+
+    for (config, source) in cases {
+        let expected = highlight_events(&source, config).unwrap();
+        for chunk_size in [1, 3, 7] {
+            let actual = highlight_events_with_split_source(&source, config, chunk_size).unwrap();
+            assert_eq!(
+                actual, expected,
+                "chunk size {chunk_size} should match byte-slice highlighting for {}",
+                config.language_name
+            );
+        }
+    }
+}
+
+#[test]
+fn test_chunked_highlighting_cancellation() {
+    let mut source = "<script>\n".to_string();
+    for _ in 0..500 {
+        source += "function a() { console.log('hi'); }\n";
+    }
+    source += "</script>\n";
+
+    let cancellation_flag = AtomicUsize::new(0);
+    let injection_callback = |name: &str| {
+        cancellation_flag.store(1, Ordering::SeqCst);
+        test_language_for_injection_string(name)
+    };
+
+    let mut highlighter = Highlighter::new();
+    let mut events = highlighter
+        .highlight_with_source(
+            &HTML_HIGHLIGHT,
+            SplitSource::new(source.as_bytes(), 3),
+            None,
+            Some(&cancellation_flag),
+            injection_callback,
+        )
+        .unwrap();
+
+    let found_cancellation_error = events.any(|event| match event {
+        Ok(_) => false,
+        Err(Error::Cancelled) => true,
+        Err(Error::InvalidLanguage | Error::Unknown) => {
+            unreachable!("Unexpected error type while iterating events")
+        }
+    });
+
+    assert!(
+        found_cancellation_error,
+        "Expected a cancellation error while iterating chunked events"
+    );
+}
+
+#[test]
 fn test_highlighting_via_c_api() {
     let highlights = [
         "class=tag\0",
@@ -715,6 +865,39 @@ fn test_language_for_injection_string<'a>(string: &str) -> Option<&'a HighlightC
         "jsdoc" => Some(&JSDOC_HIGHLIGHT),
         _ => None,
     }
+}
+
+fn highlight_events(
+    src: &str,
+    language_config: &HighlightConfiguration,
+) -> Result<Vec<HighlightEvent>, Error> {
+    let mut highlighter = Highlighter::new();
+    highlighter
+        .highlight(
+            language_config,
+            src.as_bytes(),
+            None,
+            None,
+            &test_language_for_injection_string,
+        )?
+        .collect()
+}
+
+fn highlight_events_with_split_source(
+    src: &str,
+    language_config: &HighlightConfiguration,
+    chunk_size: usize,
+) -> Result<Vec<HighlightEvent>, Error> {
+    let mut highlighter = Highlighter::new();
+    highlighter
+        .highlight_with_source(
+            language_config,
+            SplitSource::new(src.as_bytes(), chunk_size),
+            None,
+            None,
+            &test_language_for_injection_string,
+        )?
+        .collect()
 }
 
 fn to_html<'a>(
