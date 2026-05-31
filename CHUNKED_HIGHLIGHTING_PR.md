@@ -45,7 +45,7 @@ pub trait ChunkedSource<'a>: Clone {
 Highlighter::highlight_with_source(config, source, encoding, cancellation_flag, injection_callback)
 ```
 
-`ByteSliceSource` implements `ChunkedSource` for `&[u8]`, and `highlight` delegates to `highlight_with_source` through that adapter.
+`ChunkedSource` is implemented directly for `&[u8]`, and `highlight` delegates to `highlight_with_source` through that implementation.
 
 `HighlightConfiguration::highlight_capture_names()` is also added to expose capture names from only the highlights query, excluding locals and injections captures.
 

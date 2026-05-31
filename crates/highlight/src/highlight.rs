@@ -124,40 +124,28 @@ pub trait ChunkedSource<'a>: Clone {
     fn text_for_range(&self, range: ops::Range<usize>) -> Cow<'a, [u8]>;
 }
 
-#[derive(Clone, Copy)]
-pub struct ByteSliceSource<'a> {
-    source: &'a [u8],
-}
-
-impl<'a> ByteSliceSource<'a> {
-    #[must_use]
-    pub const fn new(source: &'a [u8]) -> Self {
-        Self { source }
-    }
-}
-
-impl<'a> ChunkedSource<'a> for ByteSliceSource<'a> {
+impl<'a> ChunkedSource<'a> for &'a [u8] {
     type Chunk = &'a [u8];
     type Chunks = iter::Once<&'a [u8]>;
 
     fn len(&self) -> usize {
-        self.source.len()
+        <[u8]>::len(self)
     }
 
     fn chunk_at(&mut self, byte_offset: usize, _position: Point) -> Self::Chunk {
-        if byte_offset < self.source.len() {
-            &self.source[byte_offset..]
+        if byte_offset < <[u8]>::len(self) {
+            &self[byte_offset..]
         } else {
             &[]
         }
     }
 
     fn chunks_for_node(&mut self, node: Node) -> Self::Chunks {
-        iter::once(&self.source[node.byte_range()])
+        iter::once(&self[node.byte_range()])
     }
 
     fn text_for_range(&self, range: ops::Range<usize>) -> Cow<'a, [u8]> {
-        Cow::Borrowed(&self.source[range])
+        Cow::Borrowed(&self[range])
     }
 }
 
@@ -372,7 +360,7 @@ impl Highlighter {
     ) -> Result<impl Iterator<Item = Result<HighlightEvent, Error>> + 'a, Error> {
         self.highlight_with_source(
             config,
-            ByteSliceSource::new(source),
+            source,
             encoding,
             cancellation_flag,
             injection_callback,
