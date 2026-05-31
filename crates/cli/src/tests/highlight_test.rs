@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use tree_sitter::{Node, Point};
+use tree_sitter::{Node, Point, ffi};
 use tree_sitter_highlight::{
     ChunkedSource, Error, Highlight, HighlightConfiguration, HighlightEvent, Highlighter,
     HtmlRenderer, c,
@@ -658,6 +658,47 @@ fn test_chunked_highlighting_cancellation() {
 }
 
 #[test]
+fn test_utf16_chunked_source_matches_byte_slice_highlighting() {
+    let source = "const answer = 42;\nanswer;";
+    let cases = [
+        (
+            ffi::TSInputEncodingUTF16LE,
+            utf16_bytes(source, u16::to_le_bytes),
+        ),
+        (
+            ffi::TSInputEncodingUTF16BE,
+            utf16_bytes(source, u16::to_be_bytes),
+        ),
+    ];
+
+    for (encoding, source) in cases {
+        let expected = highlight_events_from_bytes(&source, &JS_HIGHLIGHT, Some(encoding)).unwrap();
+        for chunk_size in [1, 2, 3, 7] {
+            let actual = highlight_events_with_split_source_from_bytes(
+                &source,
+                &JS_HIGHLIGHT,
+                Some(encoding),
+                chunk_size,
+            )
+            .unwrap();
+            assert_eq!(
+                actual, expected,
+                "UTF-16 chunk size {chunk_size} should match byte-slice highlighting"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_highlight_capture_names_exclude_injections_and_locals() {
+    let names = JS_HIGHLIGHT.highlight_capture_names();
+
+    assert!(names.iter().any(|name| name == "keyword"));
+    assert!(!names.iter().any(|name| name == "injection.content"));
+    assert!(!names.iter().any(|name| name == "local.definition"));
+}
+
+#[test]
 fn test_highlighting_via_c_api() {
     let highlights = [
         "class=tag\0",
@@ -867,6 +908,10 @@ fn test_language_for_injection_string<'a>(string: &str) -> Option<&'a HighlightC
     }
 }
 
+fn utf16_bytes(source: &str, encode: fn(u16) -> [u8; 2]) -> Vec<u8> {
+    source.encode_utf16().flat_map(encode).collect()
+}
+
 fn highlight_events(
     src: &str,
     language_config: &HighlightConfiguration,
@@ -877,6 +922,23 @@ fn highlight_events(
             language_config,
             src.as_bytes(),
             None,
+            None,
+            &test_language_for_injection_string,
+        )?
+        .collect()
+}
+
+fn highlight_events_from_bytes(
+    src: &[u8],
+    language_config: &HighlightConfiguration,
+    encoding: Option<ffi::TSInputEncoding>,
+) -> Result<Vec<HighlightEvent>, Error> {
+    let mut highlighter = Highlighter::new();
+    highlighter
+        .highlight(
+            language_config,
+            src,
+            encoding,
             None,
             &test_language_for_injection_string,
         )?
@@ -894,6 +956,24 @@ fn highlight_events_with_split_source(
             language_config,
             SplitSource::new(src.as_bytes(), chunk_size),
             None,
+            None,
+            &test_language_for_injection_string,
+        )?
+        .collect()
+}
+
+fn highlight_events_with_split_source_from_bytes(
+    src: &[u8],
+    language_config: &HighlightConfiguration,
+    encoding: Option<ffi::TSInputEncoding>,
+    chunk_size: usize,
+) -> Result<Vec<HighlightEvent>, Error> {
+    let mut highlighter = Highlighter::new();
+    highlighter
+        .highlight_with_source(
+            language_config,
+            SplitSource::new(src, chunk_size),
+            encoding,
             None,
             &test_language_for_injection_string,
         )?

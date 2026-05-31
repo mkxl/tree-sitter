@@ -24,6 +24,7 @@ use tree_sitter::{
 };
 
 const CANCELLATION_CHECK_INTERVAL: usize = 100;
+const UTF16_INPUT_CHUNK_SIZE: usize = 16 * 1024;
 const BUFFER_HTML_RESERVE_CAPACITY: usize = 10 * 1024;
 const BUFFER_LINES_RESERVE_CAPACITY: usize = 1000;
 
@@ -196,6 +197,7 @@ pub struct HighlightConfiguration {
     combined_injections_query: Option<Query>,
     locals_pattern_index: usize,
     highlights_pattern_index: usize,
+    highlight_capture_names: Vec<String>,
     highlight_indices: Vec<Option<Highlight>>,
     non_local_variable_patterns: Vec<bool>,
     injection_content_capture_index: Option<u32>,
@@ -446,6 +448,12 @@ impl HighlightConfiguration {
         injection_query: &str,
         locals_query: &str,
     ) -> Result<Self, QueryError> {
+        let highlight_capture_names = Query::new(&language, highlights_query)?
+            .capture_names()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
         // Concatenate the query strings, keeping track of the start offset of each section.
         let mut query_source = String::with_capacity(
             injection_query.len() + locals_query.len() + highlights_query.len(),
@@ -531,6 +539,7 @@ impl HighlightConfiguration {
             combined_injections_query,
             locals_pattern_index,
             highlights_pattern_index,
+            highlight_capture_names,
             highlight_indices,
             non_local_variable_patterns,
             injection_content_capture_index,
@@ -546,6 +555,12 @@ impl HighlightConfiguration {
     #[must_use]
     pub const fn names(&self) -> &[&str] {
         self.query.capture_names()
+    }
+
+    /// Get the capture names used by the highlights query only.
+    #[must_use]
+    pub fn highlight_capture_names(&self) -> &[String] {
+        &self.highlight_capture_names
     }
 
     /// Set the list of recognized highlight names.
@@ -653,50 +668,22 @@ impl<'a> HighlightIterLayer<'a> {
                 let parse_opts = ParseOptions::new().progress_callback(progress_callack);
 
                 let tree = match encoding {
-                    Some(encoding) if encoding == ffi::TSInputEncodingUTF16LE => {
-                        let source_bytes = source.text_for_range(0..source.len());
-                        let source_code_utf16 = source_bytes
-                            .as_ref()
-                            .chunks_exact(2)
-                            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-                            .collect::<Vec<_>>();
-                        highlighter
-                            .parser
-                            .parse_utf16_le_with_options(
-                                &mut |i, _| {
-                                    if i < source_code_utf16.len() {
-                                        &source_code_utf16[i..]
-                                    } else {
-                                        &[]
-                                    }
-                                },
-                                None,
-                                Some(parse_opts),
-                            )
-                            .ok_or(Error::Cancelled)?
-                    }
-                    Some(encoding) if encoding == ffi::TSInputEncodingUTF16BE => {
-                        let source_bytes = source.text_for_range(0..source.len());
-                        let source_code_utf16 = source_bytes
-                            .as_ref()
-                            .chunks_exact(2)
-                            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
-                            .collect::<Vec<_>>();
-                        highlighter
-                            .parser
-                            .parse_utf16_be_with_options(
-                                &mut |i, _| {
-                                    if i < source_code_utf16.len() {
-                                        &source_code_utf16[i..]
-                                    } else {
-                                        &[]
-                                    }
-                                },
-                                None,
-                                Some(parse_opts),
-                            )
-                            .ok_or(Error::Cancelled)?
-                    }
+                    Some(encoding) if encoding == ffi::TSInputEncodingUTF16LE => highlighter
+                        .parser
+                        .parse_utf16_le_with_options(
+                            &mut |i, _| utf16_input_chunk(source, i, u16::from_le_bytes),
+                            None,
+                            Some(parse_opts),
+                        )
+                        .ok_or(Error::Cancelled)?,
+                    Some(encoding) if encoding == ffi::TSInputEncodingUTF16BE => highlighter
+                        .parser
+                        .parse_utf16_be_with_options(
+                            &mut |i, _| utf16_input_chunk(source, i, u16::from_be_bytes),
+                            None,
+                            Some(parse_opts),
+                        )
+                        .ok_or(Error::Cancelled)?,
                     _ => {
                         let mut parser_source = (*source).clone();
                         highlighter
@@ -1546,4 +1533,31 @@ fn check_cancellation(
         }
     }
     Ok(())
+}
+
+fn utf16_input_chunk<'a, S>(
+    source: &S,
+    code_unit_offset: usize,
+    decode: fn([u8; 2]) -> u16,
+) -> Vec<u16>
+where
+    S: ChunkedSource<'a>,
+{
+    let byte_offset = code_unit_offset.saturating_mul(2);
+    if byte_offset >= source.len().saturating_sub(1) {
+        return Vec::new();
+    }
+
+    let byte_len = (source.len() - byte_offset).min(UTF16_INPUT_CHUNK_SIZE);
+    let byte_len = byte_len - (byte_len % 2);
+    if byte_len == 0 {
+        return Vec::new();
+    }
+
+    let bytes = source.text_for_range(byte_offset..byte_offset + byte_len);
+    bytes
+        .as_ref()
+        .chunks_exact(2)
+        .map(|chunk| decode([chunk[0], chunk[1]]))
+        .collect()
 }
