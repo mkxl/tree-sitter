@@ -690,6 +690,45 @@ fn test_utf16_chunked_source_matches_byte_slice_highlighting() {
 }
 
 #[test]
+fn test_string_sources_match_byte_slice_highlighting() {
+    let source = "const answer = 42;\nanswer;";
+    let string_source = source.to_string();
+    let expected = highlight_events(source, &JS_HIGHLIGHT).unwrap();
+
+    let actual_from_str = {
+        let mut highlighter = Highlighter::new();
+        highlighter
+            .highlight_with_source(
+                &JS_HIGHLIGHT,
+                source,
+                None,
+                None,
+                &test_language_for_injection_string,
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(actual_from_str, expected);
+
+    let actual_from_string = {
+        let mut highlighter = Highlighter::new();
+        highlighter
+            .highlight_with_source(
+                &JS_HIGHLIGHT,
+                &string_source,
+                None,
+                None,
+                &test_language_for_injection_string,
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(actual_from_string, expected);
+}
+
+#[test]
 fn test_highlight_capture_names_exclude_injections_and_locals() {
     let names = JS_HIGHLIGHT.highlight_capture_names();
 

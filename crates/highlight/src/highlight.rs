@@ -149,6 +149,58 @@ impl<'a> ChunkedSource<'a> for &'a [u8] {
     }
 }
 
+impl<'a> ChunkedSource<'a> for &'a str {
+    type Chunk = &'a [u8];
+    type Chunks = iter::Once<&'a [u8]>;
+
+    fn len(&self) -> usize {
+        (*self).len()
+    }
+
+    fn chunk_at(&mut self, byte_offset: usize, _position: Point) -> Self::Chunk {
+        let source = self.as_bytes();
+        if byte_offset < source.len() {
+            &source[byte_offset..]
+        } else {
+            &[]
+        }
+    }
+
+    fn chunks_for_node(&mut self, node: Node) -> Self::Chunks {
+        iter::once(&self.as_bytes()[node.byte_range()])
+    }
+
+    fn text_for_range(&self, range: ops::Range<usize>) -> Cow<'a, [u8]> {
+        Cow::Borrowed(&self.as_bytes()[range])
+    }
+}
+
+impl<'a> ChunkedSource<'a> for &'a String {
+    type Chunk = &'a [u8];
+    type Chunks = iter::Once<&'a [u8]>;
+
+    fn len(&self) -> usize {
+        (*self).len()
+    }
+
+    fn chunk_at(&mut self, byte_offset: usize, _position: Point) -> Self::Chunk {
+        let source = self.as_bytes();
+        if byte_offset < source.len() {
+            &source[byte_offset..]
+        } else {
+            &[]
+        }
+    }
+
+    fn chunks_for_node(&mut self, node: Node) -> Self::Chunks {
+        iter::once(&self.as_bytes()[node.byte_range()])
+    }
+
+    fn text_for_range(&self, range: ops::Range<usize>) -> Cow<'a, [u8]> {
+        Cow::Borrowed(&self.as_bytes()[range])
+    }
+}
+
 #[derive(Clone)]
 struct ChunkedTextProvider<'a, S> {
     source: S,
