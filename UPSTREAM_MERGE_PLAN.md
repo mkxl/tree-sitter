@@ -20,13 +20,76 @@ The central value proposition is:
 
 The implementation branch currently contains more than a minimal upstream PR branch should contain. Before opening an upstream PR, create a clean branch from upstream `master`/`main` and cherry-pick only the code and tests that should be reviewed.
 
+## Prior Work And References
+
+There is direct upstream prior discussion for this feature, but no upstream PR appears to implement it for `tree-sitter-highlight`.
+
+Use these references when commenting on the upstream issue and opening the PR:
+
+- `tree-sitter/tree-sitter#3485`: <https://github.com/tree-sitter/tree-sitter/issues/3485>
+- `tree-sitter/tree-sitter#1130`: <https://github.com/tree-sitter/tree-sitter/pull/1130>
+- `tree-sitter/tree-sitter#728`: <https://github.com/tree-sitter/tree-sitter/issues/728>
+- `tree-sitter/tree-sitter#2200`: <https://github.com/tree-sitter/tree-sitter/pull/2200>
+
+Key takeaways:
+
+- `#3485` is the exact upstream feature request: allow `tree-sitter-highlight` to work on source code as an iterator of slices, such as ropes.
+- `#3485` explicitly points out that `QueryCursor` supports `TextProvider`, but `Highlighter::highlight` still requires a contiguous `&[u8]`.
+- A comment on `#3485` suggests a `highlight_with` method similar to `parse_with`, while noting the mismatch between parser callbacks and `TextProvider` and the complication of injections.
+- `#1130` is strong lower-level precedent: it merged `TextProvider` for `QueryCursor` specifically to support non-contiguous rope-like source text.
+- `#728` is an older open issue about ranges and previous trees in `tree-sitter-highlight`; it contains maintainer acknowledgement that incremental highlighting is desirable but complicated by locals and injections.
+- `#2200` was a closed, unmerged PR for highlighting existing trees. A maintainer was cautious about niche methods and mentioned a more general provider-style direction.
+
+External ecosystem evidence:
+
+- Helix now uses a separate `tree-house` highlighter over `RopeSlice` instead of the upstream `tree-sitter-highlight` crate: <https://github.com/helix-editor/helix/blob/master/helix-core/src/syntax.rs>
+- `schani/minimacs#1` replaces `tree-sitter-highlight` with direct `Parser`/`QueryCursor` usage for incremental parsing and zero-copy Rope access: <https://github.com/schani/minimacs/pull/1>
+
+Recommended framing:
+
+- Treat `#3485` as the direct issue this work addresses.
+- Treat `#1130` as precedent that Tree-sitter already accepted chunked source access for queries.
+- Mention `#728` and `#2200` only as adjacent context. Do not position this PR as solving full incremental highlighting or existing-tree highlighting.
+- Avoid over-indexing on external editor implementations. Use them only to show real-world demand and why clients often bypass `tree-sitter-highlight` today.
+
 ## Recommended Action Items
 
-### 1. Open An Upstream Issue First
+### 1. Comment On The Existing Upstream Issue First
 
-Open an issue before submitting the PR. The goal is to get maintainer buy-in on the problem and broad API shape, especially because this adds public API and changes internal capture iteration.
+Do not open a duplicate issue by default. `tree-sitter/tree-sitter#3485` is already the direct upstream feature request for this work:
 
-Use this title:
+<https://github.com/tree-sitter/tree-sitter/issues/3485>
+
+Comment there before submitting the PR. The goal is to get maintainer buy-in on the implementation direction and broad API shape, especially because this adds public API and changes internal capture iteration.
+
+Use this comment on `#3485`:
+
+````markdown
+I have an implementation branch for this direction and wanted to check the API shape before opening a PR.
+
+The implementation keeps the existing byte-slice API unchanged and adds an opt-in source-provider method:
+
+```rust
+Highlighter::highlight_with_source(config, source, encoding, cancellation_flag, injection_callback)
+```
+
+where `source` implements a highlight-specific source trait that bridges parser input chunks, query `TextProvider` chunks, source length, and range text needed for injections/locals.
+
+This builds on the lower-level direction from #1130: `QueryCursor` can already work with non-contiguous text through `TextProvider`; the remaining gap is that `tree-sitter-highlight` still stores/slices a contiguous `&[u8]` internally.
+
+The main internal implementation tradeoff is that each highlight layer collects query capture metadata into an owned internal stream instead of storing a live `QueryCaptures` iterator. The stream stores capture metadata and event order, but not source text. Source text is still read from the provider only when needed.
+
+This keeps existing highlighting semantics for injections, combined injections, locals, precedence, cancellation, and byte-slice callers. It does not try to solve full incremental highlighting or existing-tree highlighting from #728/#2200.
+
+Before opening the PR, I would especially like feedback on:
+
+1. Whether a highlight-specific source trait is preferable to trying to expose `tree_sitter::TextProvider` directly.
+2. Whether adding `highlight_with_source` is preferable to making `highlight` generic, given compatibility/coercion concerns for existing byte-slice callers.
+3. Whether the owned capture metadata stream is an acceptable correctness-first implementation tradeoff.
+4. Whether UTF-16 chunked parsing should be included in the first PR or split out.
+````
+
+If maintainers ask for a fresh issue instead of continuing `#3485`, use this title:
 
 ```text
 tree-sitter-highlight: support chunked/non-contiguous source providers
@@ -34,7 +97,7 @@ tree-sitter-highlight: support chunked/non-contiguous source providers
 
 Use this issue body:
 
-```markdown
+````markdown
 ## Problem
 
 `tree-sitter-highlight` currently requires callers to pass the full source document as one contiguous `&[u8]`:
@@ -60,6 +123,20 @@ The lower-level APIs already support this kind of input:
 - `QueryCursor::matches` and `QueryCursor::captures` accept a `TextProvider`.
 
 The remaining limitation is inside `tree-sitter-highlight`, where `HighlightIter` and `HighlightIterLayer` store and slice the original `&[u8]` for parser input, query text, injections, locals, source length, and rendering ranges.
+
+## Prior Discussion
+
+This is the highlighter-side version of the source-provider support requested in #3485:
+
+https://github.com/tree-sitter/tree-sitter/issues/3485
+
+That issue points out the same gap: `QueryCursor` already accepts `TextProvider`, but `tree-sitter-highlight` still requires a contiguous byte slice.
+
+There is also lower-level precedent in #1130, which introduced `TextProvider` for `QueryCursor` specifically to support non-contiguous rope-like source text:
+
+https://github.com/tree-sitter/tree-sitter/pull/1130
+
+There are adjacent discussions about incremental highlighting and existing-tree highlighting in #728 and #2200. This proposal does not try to solve full incremental highlighting or existing-tree highlighting; it focuses on allowing the current highlighter pipeline to read source text from non-contiguous storage while preserving existing highlighting semantics.
 
 ## Proposed Direction
 
@@ -128,7 +205,7 @@ This may allocate more than the current streaming implementation, but it signifi
 5. Would maintainers prefer this as one PR or split into smaller PRs?
 
 If this sounds reasonable, I can put together a PR with parity tests showing that byte-slice and chunked-source highlighting produce identical `HighlightEvent` streams across normal highlighting, injections, locals, UTF-16, and cancellation.
-```
+````
 
 ### 2. Wait For API Feedback Before Opening The PR
 
@@ -230,7 +307,7 @@ feat(highlight): expose highlight-only capture names
 
 Separate PR body:
 
-```markdown
+````markdown
 ## Summary
 
 Add `HighlightConfiguration::highlight_capture_names()` to expose capture names from only the highlights query, excluding injection and locals captures.
@@ -244,7 +321,7 @@ This stores the highlight-only capture names during configuration construction u
 ## Compatibility
 
 This is additive. Existing `names()` behavior is unchanged.
-```
+````
 
 ### 6. Add Or Run Benchmarks If Possible
 
@@ -289,7 +366,7 @@ feat(highlight): support chunked source providers
 
 Use this PR body:
 
-```markdown
+````markdown
 ## Summary
 
 - Add `Highlighter::highlight_with_source` for highlighting source text provided in chunks.
@@ -298,11 +375,19 @@ Use this PR body:
 - Refactor highlight layers to store owned query capture metadata instead of a live `QueryCaptures` iterator.
 - Add parity tests showing chunked-source highlighting matches byte-slice highlighting.
 
+Closes #3485.
+
 ## Motivation
 
 `tree-sitter-highlight` currently requires callers to provide a contiguous `&[u8]`. Rope-backed editors and terminal UI clients need to materialize the whole document before highlighting, even though Tree-sitter's parser and query APIs already support chunked input.
 
 This PR lets those clients keep using `tree-sitter-highlight` for highlight semantics while providing source text from non-contiguous storage.
+
+## Related Prior Work
+
+This implements the highlighter-side source-provider support requested in #3485. The lower-level query API already moved in this direction in #1130, which introduced `TextProvider` for `QueryCursor` specifically to support non-contiguous rope-like source text.
+
+There are adjacent discussions about incremental highlighting and existing-tree highlighting in #728 and #2200. This PR does not try to solve those larger problems; it focuses on allowing the current highlighter pipeline to read source text from non-contiguous storage while preserving existing highlighting semantics.
 
 ## API
 
@@ -375,7 +460,7 @@ cargo +stable test -p tree-sitter-cli --no-default-features test_utf16_chunked_s
 cargo +stable check -p tree-sitter-cli --tests
 git diff --check
 ```
-```
+````
 
 ### 9. Prepare Review Response Templates
 
@@ -421,10 +506,23 @@ The existing byte-slice API is unchanged and delegates through the same source-p
 `TextProvider` covers query text for nodes, but the highlighter needs more than that: parser input chunks, source length, and range text for injection names and locals. A highlight-specific source trait can bridge parser input, query input, and range text while still using `TextProvider` internally.
 ```
 
+#### How does this relate to #3485 and #1130?
+
+```markdown
+This is intended to implement the highlighter-side source-provider support requested in #3485. The lower-level query API already supports non-contiguous text through `TextProvider`, which was introduced in #1130 specifically for rope-like source storage. This PR closes the remaining gap in `tree-sitter-highlight`, where the highlighter still stores and slices a contiguous `&[u8]` internally.
+```
+
+#### Does this solve incremental or existing-tree highlighting from #728/#2200?
+
+```markdown
+No. This PR intentionally focuses on source storage, not tree ownership or incremental invalidation. It lets the existing highlighter pipeline read from non-contiguous source storage while preserving injection, locals, precedence, and cancellation semantics. Existing-tree and fully incremental highlighting are larger API/algorithm questions that can be addressed separately.
+```
+
 ## Final Checklist Before Upstream PR
 
-- [ ] Upstream issue opened and linked.
+- [ ] Comment added to upstream issue `#3485`, or a fresh issue opened only if maintainers ask for one.
 - [ ] Maintainer feedback incorporated or acknowledged.
+- [ ] PR body says `Closes #3485` and references `#1130` as lower-level precedent.
 - [ ] Clean PR branch created from upstream `master`/`main`.
 - [ ] Fork-only markdown files removed from PR branch.
 - [ ] Version bump/reset commits excluded from PR branch unless requested.
